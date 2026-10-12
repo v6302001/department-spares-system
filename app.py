@@ -9,7 +9,9 @@ from psycopg.rows import dict_row
 import hashlib
 import secrets
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from pathlib import Path
+from streamlit_autorefresh import st_autorefresh
 
 import pandas as pd
 import streamlit as st
@@ -23,8 +25,11 @@ for folder in (OUTPUT_DIR, BACKUP_DIR):
 
 st.set_page_config(page_title="部門備品管理系統", page_icon="📦", layout="wide")
 
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Return current Vietnam local time for new audit and inventory records."""
+    return datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 
@@ -357,6 +362,11 @@ def main_app():
             st.rerun()
 
     if page == "總覽儀表板":
+        st_autorefresh(
+            interval=10_000,
+            limit=None,
+            key="dashboard_auto_refresh",
+        )
         st.title("總覽儀表板")
         df = stock_df()
         if df.empty:
@@ -833,7 +843,7 @@ def main_app():
                 payload = json.dumps(snapshot, ensure_ascii=False, indent=2, default=str).encode("utf-8")
                 st.download_button(
                     "下載雲端備份 JSON", data=payload,
-                    file_name=f"spares_postgres_backup_{datetime.now():%Y%m%d_%H%M%S}.json",
+                    file_name=f"spares_postgres_backup_{datetime.now(VN_TZ):%Y%m%d_%H%M%S}.json",
                     mime="application/json", use_container_width=True,
                 )
                 log_action(user["username"], "準備雲端備份", f"包含 {len(table_names)} 張資料表")
