@@ -680,7 +680,7 @@ def main_app():
 
     elif page == "人員與權限":
         st.title("人員與權限")
-        change_own_password()
+        # 密碼修改表單已統一放在側邊欄，避免同一個 Streamlit form key 重複建立。
         require_system_admin()
         st.divider()
         st.caption("帳號建立後立即生效；員工自行註冊的帳號預設為員工權限。")
