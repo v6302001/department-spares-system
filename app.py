@@ -26,27 +26,23 @@ st.set_page_config(page_title="部門備品管理系統", page_icon="📦", layo
 def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+
 def connect():
-    required = ["SPARES_PG_HOST", "SPARES_PG_PORT", "SPARES_PG_DATABASE",
-                "SPARES_PG_USER", "SPARES_PG_PASSWORD"]
-    missing = [key for key in required if not os.environ.get(key)]
-    if missing:
+    database_url = os.environ.get("DATABASE_URL")
+
+    if not database_url:
         raise RuntimeError(
-            "缺少 PostgreSQL 連線環境變數：" + ", ".join(missing) +
-            "。請先設定 SPARES_PG_HOST、SPARES_PG_PORT、SPARES_PG_DATABASE、"
-            "SPARES_PG_USER、SPARES_PG_PASSWORD。"
+            "缺少 DATABASE_URL 環境變數，請在 Render 的 Environment 中設定。"
         )
+
     return psycopg.connect(
-        host=os.environ["SPARES_PG_HOST"],
-        port=os.environ["SPARES_PG_PORT"],
-        dbname=os.environ["SPARES_PG_DATABASE"],
-        user=os.environ["SPARES_PG_USER"],
-        password=os.environ["SPARES_PG_PASSWORD"],
-        sslmode=os.environ.get("SPARES_PG_SSLMODE", "require"),
-        row_factory=dict_row,
-        connect_timeout=15,
+        database_url,
+        sslmode="require",
         options="-c search_path=spares,public",
+        row_factory=dict_row,
     )
+
 
 
 def query_df(query, con, params=None):
