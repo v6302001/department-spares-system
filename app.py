@@ -696,7 +696,7 @@ def main_app():
             with connect() as con:
                 row = con.execute("SELECT username,display_name,role,active FROM users WHERE username=%s", (uname,)).fetchone()
                 staff_row = con.execute("SELECT department FROM staff WHERE name=%s", (row["display_name"],)).fetchone()
-            default_username, default_display, default_role, default_active = row["username"], row["display_name"], row["role"], bool(row["active"])
+            default_username, default_display, default_role, default_active = row["username"], row["display_name"], normalize_role(row["role"]), bool(row["active"])
             if staff_row and staff_row["department"] in ["生技", "品保", "製造"]:
                 default_department = staff_row["department"]
         else:
