@@ -223,8 +223,31 @@ def login_screen():
                     con.commit()
                 log_action(reg_username.strip(), "自行建立帳號", "employee")
                 st.success("帳號建立成功，現在即可登入。")
-            except psycopg.IntegrityError:
-                st.error("此工號已存在，請使用其他工號。")
+            except psycopg.IntegrityError as e:
+                diag = getattr(e, "diag", None)
+                sqlstate = getattr(e, "sqlstate", None)
+                constraint = getattr(diag, "constraint_name", None)
+                table = getattr(diag, "table_name", None)
+                column = getattr(diag, "column_name", None)
+
+                print(
+                    "[REGISTER_INTEGRITY_ERROR] "
+                    f"sqlstate={sqlstate!r}, "
+                    f"constraint={constraint!r}, "
+                    f"table={table!r}, "
+                    f"column={column!r}",
+                    flush=True,
+                )
+
+                if constraint == "users_username_key":
+                    st.error("此工號已存在於登入帳號資料中。")
+                elif constraint == "staff_name_key":
+                    st.error("此工號已存在於人員資料中，請檢查人員清單。")
+                else:
+                    st.error(
+                        "建立帳號時發生資料庫完整性錯誤。"
+                        "請查看 Render Logs 的 REGISTER_INTEGRITY_ERROR 記錄。"
+                    )
 
 def change_own_password():
     st.subheader("修改我的密碼")
