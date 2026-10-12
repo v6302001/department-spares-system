@@ -1,0 +1,12 @@
+﻿.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+backups/
+output/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+.venv/
+venv/
