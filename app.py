@@ -145,7 +145,21 @@ ROLE_LABELS = {
     "system_admin": "系統管理員",
     "manager": "管理員權限",
     "employee": "員工權限",
+    # 舊版資料庫使用的角色名稱，保留相容顯示。
+    "admin": "系統管理員（舊版角色）",
+    "operator": "員工權限（舊版角色）",
 }
+
+
+def normalize_role(role):
+    """Map legacy database role values to the current three-role model."""
+    return {
+        "admin": "system_admin",
+        "operator": "employee",
+        "system_admin": "system_admin",
+        "manager": "manager",
+        "employee": "employee",
+    }.get(str(role or "").strip(), "employee")
 
 def require_system_admin():
     if st.session_state.user["role"] != "system_admin":
@@ -171,7 +185,10 @@ def login_screen():
         with connect() as con:
             user = con.execute("SELECT * FROM users WHERE username=%s AND active=1", (username.strip(),)).fetchone()
         if user and verify_password(password, user["salt"], user["password_hash"]):
-            st.session_state.user = dict(user)
+            # 相容既有資料庫：舊版 admin/operator 角色映射到新權限模型。
+            user_data = dict(user)
+            user_data["role"] = normalize_role(user_data.get("role"))
+            st.session_state.user = user_data
             log_action(username.strip(), "登入", "登入成功")
             st.rerun()
         else:
