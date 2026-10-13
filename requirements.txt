@@ -1,5 +1,5 @@
-streamlit
-pandas
-openpyxl
-psycopg[binary]
-streamlit-autorefresh
+streamlit>=1.40
+pandas>=2.2
+openpyxl>=3.1
+psycopg[binary]>=3.2
+streamlit-autorefresh>=1.0.1
