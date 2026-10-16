@@ -2129,12 +2129,15 @@ def main_app():
         if df.empty:
             st.info("尚無備品資料。")
             return
-        q = st.text_input("搜尋備品編號、名稱、規格、儲位或設備編號")
+        q = st.text_input("搜尋備品編號、名稱或規格")
         if q:
+            # 先用完整資料搜尋，再只隱藏此頁面的指定顯示欄位；資料庫與其他模組不變。
             mask = df.astype(str).apply(lambda col: col.str.contains(q, case=False, na=False)).any(axis=1)
             df = df[mask]
-        st.dataframe(df.drop(columns=["id"]), use_container_width=True, hide_index=True)
-        st.download_button("下載目前庫存 CSV", df.drop(columns=["id"]).to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+        hidden_columns = ["id", "儲位", "關聯設備編號"]
+        display_df = df.drop(columns=hidden_columns, errors="ignore")
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.download_button("下載目前庫存 CSV", display_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
                            file_name=f"目前庫存_{date.today():%Y%m%d}.csv", mime="text/csv")
 
     elif page == "缺少清單":
@@ -2322,15 +2325,34 @@ def main_app():
                 active_items = query_df("SELECT code AS 備品編號,name AS 備品名稱 FROM items WHERE active=1 ORDER BY code", con)
                 inactive_items = query_df("SELECT code AS 備品編號,name AS 備品名稱 FROM items WHERE active=0 ORDER BY code", con)
             if not active_items.empty:
-                disable_choice = st.selectbox("選擇要失效的備品", active_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist(), key="item_disable_choice")
-                if st.button("確認失效"):
-                    code = disable_choice.split(" | ",1)[0]
-                    with connect() as con:
-                        con.execute("UPDATE items SET active=0,updated_at=%s WHERE code=%s AND active=1", (now_str(),code))
-                        con.commit()
-                    log_action(user["username"], "停用備品", code)
-                    st.success("備品已設為失效；歷史異動紀錄保留。")
-                    st.rerun()
+                active_labels = active_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist()
+                disable_choices = st.multiselect(
+                    "選擇要失效的備品（可複選）", active_labels,
+                    key="item_batch_disable_choices"
+                )
+                confirm_disable = st.checkbox(
+                    "我已確認將所選備品批量設為失效；歷史異動紀錄會保留。",
+                    key="confirm_item_batch_disable"
+                )
+                if st.button("確認批量失效", type="secondary", key="confirm_batch_disable_button"):
+                    if not disable_choices:
+                        st.warning("請至少選擇一筆備品。")
+                    elif not confirm_disable:
+                        st.error("請先勾選確認框。")
+                    else:
+                        codes = [label.split(" | ", 1)[0] for label in disable_choices]
+                        changed = 0
+                        with connect() as con:
+                            with con.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE items SET active=0,updated_at=%s WHERE active=1 AND code = ANY(%s)",
+                                    (now_str(), codes)
+                                )
+                                changed = cur.rowcount
+                            con.commit()
+                        log_action(user["username"], "批量失效備品", f"共 {changed} 筆：" + ", ".join(codes))
+                        st.success(f"已將 {changed} 筆備品設為失效；歷史異動紀錄保留。")
+                        st.rerun()
             if not inactive_items.empty:
                 restore_choice = st.selectbox("選擇要恢復的備品", inactive_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist(), key="item_restore_choice")
                 if st.button("確認恢復"):
