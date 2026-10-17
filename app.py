@@ -851,7 +851,9 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS handler_name TEXT DEFAULT '',
                 ADD COLUMN IF NOT EXISTS handling_started_at TEXT DEFAULT '',
                 ADD COLUMN IF NOT EXISTS handling_finished_at TEXT DEFAULT '',
-                ADD COLUMN IF NOT EXISTS handling_hours DOUBLE PRECISION NOT NULL DEFAULT 0
+                ADD COLUMN IF NOT EXISTS handling_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT '未結案',
+                ADD COLUMN IF NOT EXISTS closed_at TEXT DEFAULT ''
             """)
             con.commit()
 
@@ -1973,6 +1975,7 @@ def main_app():
                 symptom = st.text_area("異常現象 *")
                 root_cause = st.text_area("異常原因／根本原因")
                 action_taken = st.text_area("處理措施與結果")
+                abnormal_status = st.selectbox("處理狀態", ["未結案", "處理中", "已結案"], index=None, placeholder="請選擇處理狀態")
                 handler_name = st.text_input("處理人員", value=user["display_name"])
                 handling_started_at = st.text_input("開始處理時間（YYYY-MM-DD HH:MM:SS）", value=now_str())
                 handling_finished_at = st.text_input("處理完成時間（未完成可留空）", value="")
@@ -1980,6 +1983,8 @@ def main_app():
             if save_abnormal:
                 if not symptom.strip():
                     st.error("請填寫異常現象。")
+                elif not abnormal_status:
+                    st.error("請選擇處理狀態：未結案、處理中或已結案。")
                 elif not handler_name.strip():
                     st.error("請填寫處理人員。")
                 else:
@@ -1998,9 +2003,10 @@ def main_app():
                                 equipment_id,occurred_at,severity,symptom,root_cause,action_taken,
                                 downtime_hours,status,closed_at,reported_by,created_at,
                                 handler_name,handling_started_at,handling_finished_at,handling_hours)
-                                VALUES(%s,%s,%s,%s,%s,%s,0,'',%s,%s,%s,%s,%s,%s,%s)""",
+                                VALUES(%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s)""",
                                 (eqmap[eq_choice],occurred_dt.strftime("%Y-%m-%d %H:%M:%S"),severity,symptom.strip(),
-                                 root_cause.strip(),action_taken.strip(),finished_raw,user["username"],now_str(),
+                                 root_cause.strip(),action_taken.strip(),abnormal_status,
+                                 finished_raw if abnormal_status == "已結案" else "",user["username"],now_str(),
                                  handler_name.strip(),started_dt.strftime("%Y-%m-%d %H:%M:%S"),finished_raw,handling_hours))
                             con.commit()
                         log_action(user["username"], "新增設備異常", f"{eq_choice} | {handler_name.strip()} | {symptom.strip()}")
@@ -2016,18 +2022,25 @@ def main_app():
         with connect() as con:
             df = query_df("""SELECT e.equipment_code AS 設備編號,e.equipment_name AS 設備名稱,
                 a.occurred_at AS 異常發生時間,a.severity AS 嚴重程度,a.symptom AS 異常現象,
-                a.root_cause AS 異常原因,a.action_taken AS 處理措施與結果,a.handler_name AS 處理人員,
-                a.handling_started_at AS 開始處理時間,a.handling_finished_at AS 處理完成時間,
-                a.handling_hours AS 處理時數,a.reported_by AS 登錄帳號
+                a.root_cause AS 異常原因,a.action_taken AS 處理措施與結果,a.status AS 處理狀態,
+                a.handler_name AS 處理人員,a.handling_started_at AS 開始處理時間,
+                a.handling_finished_at AS 處理完成時間,a.handling_hours AS 處理時數,
+                a.closed_at AS 結案時間,a.reported_by AS 登錄帳號
                 FROM equipment_abnormalities a JOIN equipment e ON e.id=a.equipment_id
                 ORDER BY a.occurred_at DESC,a.id DESC""", con)
         st.dataframe(df, use_container_width=True, hide_index=True)
         with connect() as con:
             abnormal_rows = con.execute("SELECT a.*,e.equipment_code,e.equipment_name FROM equipment_abnormalities a JOIN equipment e ON e.id=a.equipment_id ORDER BY a.occurred_at DESC,a.id DESC").fetchall()
             abnormal_eqs = con.execute("SELECT id,equipment_code,equipment_name FROM equipment ORDER BY equipment_code").fetchall()
-        if abnormal_rows and user["role"] in ("system_admin", "manager"):
-            st.subheader("修改／刪除設備異常紀錄")
-            abnormal_map = {f"{r['occurred_at']} | {r['equipment_code']} | {str(r['symptom'])[:35]} | ID:{r['id']}": dict(r) for r in abnormal_rows}
+        # 管理員可修改所有異常紀錄；員工僅能修改自己登錄的紀錄。
+        can_manage_all_abnormalities = user["role"] in ("system_admin", "manager")
+        editable_abnormal_rows = [
+            r for r in abnormal_rows
+            if can_manage_all_abnormalities or r["reported_by"] == user["username"]
+        ]
+        if editable_abnormal_rows:
+            st.subheader("修改設備異常紀錄" if user["role"] == "employee" else "修改／刪除設備異常紀錄")
+            abnormal_map = {f"{r['occurred_at']} | {r['equipment_code']} | {str(r['symptom'])[:35]} | ID:{r['id']}": dict(r) for r in editable_abnormal_rows}
             abnormal_label = st.selectbox("選擇異常紀錄", list(abnormal_map), key="edit_abnormal_select")
             ar = abnormal_map[abnormal_label]
             abnormal_eq_map = {f"{r['equipment_code']} | {r['equipment_name']}": r['id'] for r in abnormal_eqs}
@@ -2064,16 +2077,18 @@ def main_app():
                         st.rerun()
                 except ValueError:
                     st.error("時間格式錯誤，請使用 YYYY-MM-DD HH:MM:SS。")
-            st.checkbox("確認刪除此筆異常紀錄", key="confirm_delete_abnormal")
-            if st.button("刪除異常紀錄", key="delete_abnormal_button"):
-                if not st.session_state.get("confirm_delete_abnormal", False): st.error("請先勾選確認框。")
-                else:
-                    with connect() as con:
-                        con.execute("DELETE FROM equipment_abnormalities WHERE id=%s", (ar['id'],))
-                        con.commit()
-                    log_action(user["username"], "刪除設備異常", str(ar['id']))
-                    st.success("設備異常紀錄已刪除。")
-                    st.rerun()
+            # 員工只能修改自己登錄的紀錄，不提供刪除功能。
+            if can_manage_all_abnormalities:
+                st.checkbox("確認刪除此筆異常紀錄", key="confirm_delete_abnormal")
+                if st.button("刪除異常紀錄", key="delete_abnormal_button"):
+                    if not st.session_state.get("confirm_delete_abnormal", False): st.error("請先勾選確認框。")
+                    else:
+                        with connect() as con:
+                            con.execute("DELETE FROM equipment_abnormalities WHERE id=%s", (ar['id'],))
+                            con.commit()
+                        log_action(user["username"], "刪除設備異常", str(ar['id']))
+                        st.success("設備異常紀錄已刪除。")
+                        st.rerun()
         st.subheader("人員處理異常時間分析")
         with connect() as con:
             analysis_df = query_df("""SELECT handler_name AS 處理人員,
