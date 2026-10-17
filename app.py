@@ -1390,6 +1390,70 @@ def main_app():
                 log_action(user["username"], "更新人員技能", f"{code} | {skill_choice} | {level}")
                 st.success("人員技能等級已儲存。")
                 st.rerun()
+
+            # Batch skill assignment: select one employee, multiple skills, and a level per skill.
+            st.divider()
+            st.subheader("一次為同一人員設定多筆技能")
+            batch_person_choice = st.selectbox(
+                "批量設定人員",
+                list(people_map),
+                key="batch_skill_person_choice",
+            )
+            batch_skill_choices = st.multiselect(
+                "選擇多個技能項目",
+                skill_names,
+                key="batch_skill_choices",
+                help="可一次選取多個技能，再分別設定每項技能的熟練等級。",
+            )
+            batch_levels = {}
+            level_options_batch = ["待評估", "初級 (1-2)", "中級 (3-5)", "熟練 (6-8)", "專家 (9-10)"]
+            if batch_skill_choices:
+                st.caption("請分別設定每個技能項目的熟練等級")
+                for batch_skill in batch_skill_choices:
+                    batch_levels[batch_skill] = st.selectbox(
+                        f"{batch_skill}｜熟練等級",
+                        level_options_batch,
+                        key=f"batch_skill_level_{batch_skill}",
+                    )
+            batch_assessed_date = st.date_input("批量評估日期", key="batch_skill_assessed_date")
+            batch_assessed_by = st.text_input(
+                "批量評估人員", value=user["display_name"], key="batch_skill_assessed_by"
+            )
+            batch_skill_notes = st.text_area("批量評估備註（適用於所選技能）", key="batch_skill_notes")
+            if st.button("批量儲存技能等級", key="batch_save_skill_records"):
+                if not batch_skill_choices:
+                    st.error("請至少選擇一個技能項目。")
+                else:
+                    batch_code = people_map[batch_person_choice]
+                    timestamp = now_str()
+                    try:
+                        with connect() as con:
+                            for batch_skill in batch_skill_choices:
+                                con.execute(
+                                    """INSERT INTO personnel_skill_records
+                                    (employee_code,skill_name,skill_level,assessed_date,assessed_by,notes,created_at,updated_at)
+                                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+                                    ON CONFLICT(employee_code,skill_name) DO UPDATE SET
+                                    skill_level=excluded.skill_level,
+                                    assessed_date=excluded.assessed_date,
+                                    assessed_by=excluded.assessed_by,
+                                    notes=excluded.notes,
+                                    updated_at=excluded.updated_at""",
+                                    (
+                                        batch_code, batch_skill, batch_levels[batch_skill],
+                                        batch_assessed_date.isoformat(), batch_assessed_by.strip(),
+                                        batch_skill_notes.strip(), timestamp, timestamp,
+                                    ),
+                                )
+                            con.commit()
+                        log_action(
+                            user["username"], "批量更新人員技能",
+                            f"{batch_code} | {len(batch_skill_choices)} 項技能",
+                        )
+                        st.success(f"已完成 {batch_person_choice} 的 {len(batch_skill_choices)} 項技能設定。")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"批量儲存失敗，資料庫交易已取消：{exc}")
         elif not people:
             st.info("請先建立人員資料。")
         elif not skills_catalog:
