@@ -572,7 +572,13 @@ for _api_name in (
     _wrap_streamlit_text_api(_api_name)
 
 # Translate table column headers and visible string values in bilingual mode.
-_original_dataframe = st.dataframe
+# Streamlit reruns this script on every interaction. Preserve the true original
+# dataframe function so reruns never wrap _bilingual_dataframe inside itself.
+_current_dataframe = st.dataframe
+_original_dataframe = getattr(
+    _current_dataframe, "_bilingual_original_dataframe", _current_dataframe
+)
+
 def _bilingual_dataframe(data=None, *args, **kwargs):
     if st.session_state.get("ui_language", "中文") == "越南語" and isinstance(data, pd.DataFrame):
         data = data.copy()
@@ -581,6 +587,9 @@ def _bilingual_dataframe(data=None, *args, **kwargs):
             if data[col].dtype == object:
                 data[col] = data[col].map(lambda x: tr_text(x) if isinstance(x, str) else x)
     return _original_dataframe(data, *args, **kwargs)
+
+_bilingual_dataframe._bilingual_original_dataframe = _original_dataframe
+_bilingual_dataframe._bilingual_wrapped = True
 st.dataframe = _bilingual_dataframe
 
 # Sidebar also uses Streamlit APIs; translate labels and visible option values.
@@ -2037,32 +2046,6 @@ def main_app():
             st.dataframe(view[["備品編號","備品名稱","規格","目前庫存","最低庫存","目標庫存","缺少數量"]].sort_values("目前庫存"), use_container_width=True, hide_index=True)
         else:
             st.success("目前沒有低於最低庫存的備品。")
-        st.subheader("最近 10 筆異動")
-        with connect() as con:
-            recent = query_df("""WITH activity AS (
-                SELECT m.created_at AS 時間,m.movement_type AS 類型,i.code AS 備品編號,
-                       i.name AS 備品名稱,m.qty AS 數量,m.staff_name AS "領用/相關人員",
-                       m.operator_username AS 操作帳號,m.reason AS 原因,m.before_qty AS 異動前,
-                       m.after_qty AS 異動後,m.id AS sort_id
-                FROM movements m JOIN items i ON i.id=m.item_id
-                UNION ALL
-                SELECT a.created_at AS 時間,
-                       CASE WHEN a.action='新增備品' THEN '新增料號'
-                            WHEN a.action='停用備品' THEN '停用料號' ELSE a.action END AS 類型,
-                       a.detail AS 備品編號,i.name AS 備品名稱,NULL AS 數量,
-                       NULL AS "領用/相關人員",a.username AS 操作帳號,
-                       CASE WHEN a.action='新增備品' THEN '建立新備品'
-                            WHEN a.action='停用備品' THEN '停用備品' ELSE a.detail END AS 原因,
-                       NULL AS 異動前,NULL AS 異動後,a.id AS sort_id
-                FROM audit_log a LEFT JOIN items i ON i.code=a.detail
-                WHERE a.action IN ('新增備品','停用備品')
-            )
-            SELECT 時間,類型,備品編號,備品名稱,數量,"領用/相關人員",操作帳號,原因,異動前,異動後
-            FROM activity
-            -- created_at 在現有資料庫中是 TEXT；使用同格式字串比較，避免 TEXT 與 TIMESTAMP 型別不相容。
-            WHERE 時間 >= '2026-10-16 00:00:00'
-            ORDER BY 時間 DESC,sort_id DESC LIMIT 10""", con)
-        st.dataframe(recent, use_container_width=True, hide_index=True)
 
     elif page == "入庫 / 出庫":
         st.title("入庫 / 出庫")
@@ -2132,12 +2115,13 @@ def main_app():
         if df.empty:
             st.info("尚無備品資料。")
             return
-        q = st.text_input("搜尋備品編號、名稱、規格、儲位或設備編號")
+        q = st.text_input("搜尋備品編號、名稱或規格")
         if q:
+            # 先用完整資料搜尋，再只隱藏此頁面的指定顯示欄位；資料庫與其他模組不變。
             mask = df.astype(str).apply(lambda col: col.str.contains(q, case=False, na=False)).any(axis=1)
             df = df[mask]
-        # 庫存查詢頁面僅隱藏顯示欄位；資料庫欄位及其他模組不受影響。
-        display_df = df.drop(columns=["id", "儲位", "關聯設備編號"], errors="ignore")
+        hidden_columns = ["id", "儲位", "關聯設備編號"]
+        display_df = df.drop(columns=hidden_columns, errors="ignore")
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         st.download_button("下載目前庫存 CSV", display_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
                            file_name=f"目前庫存_{date.today():%Y%m%d}.csv", mime="text/csv")
@@ -2327,33 +2311,33 @@ def main_app():
                 active_items = query_df("SELECT code AS 備品編號,name AS 備品名稱 FROM items WHERE active=1 ORDER BY code", con)
                 inactive_items = query_df("SELECT code AS 備品編號,name AS 備品名稱 FROM items WHERE active=0 ORDER BY code", con)
             if not active_items.empty:
-                disable_choice = st.selectbox("選擇要失效的備品", active_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist(), key="item_disable_choice")
-                if st.button("確認失效"):
-                    code = disable_choice.split(" | ",1)[0]
-                    with connect() as con:
-                        con.execute("UPDATE items SET active=0,updated_at=%s WHERE code=%s AND active=1", (now_str(),code))
-                        con.commit()
-                    log_action(user["username"], "停用備品", code)
-                    st.success("備品已設為失效；歷史異動紀錄保留。")
-                    st.rerun()
-            st.markdown("#### 批量失效備品")
-            if not active_items.empty:
                 active_labels = active_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist()
-                batch_disable = st.multiselect("選擇要批量失效的備品（可複選）", active_labels, key="item_batch_disable")
-                confirm_batch_disable = st.checkbox("我確認將所選備品設為失效；不會刪除庫存及歷史異動紀錄", key="confirm_item_batch_disable")
-                if st.button("確認批量失效", key="item_batch_disable_button"):
-                    if not batch_disable:
+                disable_choices = st.multiselect(
+                    "選擇要失效的備品（可複選）", active_labels,
+                    key="item_batch_disable_choices"
+                )
+                confirm_disable = st.checkbox(
+                    "我已確認將所選備品批量設為失效；歷史異動紀錄會保留。",
+                    key="confirm_item_batch_disable"
+                )
+                if st.button("確認批量失效", type="secondary", key="confirm_batch_disable_button"):
+                    if not disable_choices:
                         st.warning("請至少選擇一筆備品。")
-                    elif not confirm_batch_disable:
+                    elif not confirm_disable:
                         st.error("請先勾選確認框。")
                     else:
-                        codes = [x.split(" | ",1)[0] for x in batch_disable]
+                        codes = [label.split(" | ", 1)[0] for label in disable_choices]
+                        changed = 0
                         with connect() as con:
-                            cur = con.execute("UPDATE items SET active=0,updated_at=%s WHERE active=1 AND code = ANY(%s) RETURNING code", (now_str(), codes))
-                            changed = [r["code"] for r in cur.fetchall()]
+                            with con.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE items SET active=0,updated_at=%s WHERE active=1 AND code = ANY(%s)",
+                                    (now_str(), codes)
+                                )
+                                changed = cur.rowcount
                             con.commit()
-                        log_action(user["username"], "批量停用備品", f"共 {len(changed)} 筆：{', '.join(changed)}")
-                        st.success(f"批量失效完成，共 {len(changed)} 筆；歷史異動紀錄保留。")
+                        log_action(user["username"], "批量失效備品", f"共 {changed} 筆：" + ", ".join(codes))
+                        st.success(f"已將 {changed} 筆備品設為失效；歷史異動紀錄保留。")
                         st.rerun()
             if not inactive_items.empty:
                 restore_choice = st.selectbox("選擇要恢復的備品", inactive_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist(), key="item_restore_choice")
@@ -2386,43 +2370,6 @@ def main_app():
                                 log_action(user["username"], "刪除料號", f"{code}；一併刪除庫存異動紀錄 {count} 筆")
                                 st.success(f"失效料號 {code} 已刪除，並一併刪除 {count} 筆異動紀錄。")
                                 st.rerun()
-            st.markdown("#### 批量刪除失效備品")
-            if not inactive_items.empty:
-                inactive_labels = inactive_items.apply(lambda r:f"{r['備品編號']} | {r['備品名稱']}",axis=1).tolist()
-                batch_delete = st.multiselect("選擇要批量刪除的失效備品（可複選）", inactive_labels, key="item_batch_delete")
-                st.caption("安全限制：有庫存異動紀錄的料號不會批量刪除，以免破壞稽核紀錄；請先檢查這些料號。")
-                confirm_batch_delete = st.checkbox("我確認永久刪除所選且沒有庫存異動紀錄的失效備品（無法復原）", key="confirm_item_batch_delete")
-                if st.button("確認批量刪除", type="secondary", key="item_batch_delete_button"):
-                    if not batch_delete:
-                        st.warning("請至少選擇一筆備品。")
-                    elif not confirm_batch_delete:
-                        st.error("請先勾選確認框。")
-                    else:
-                        codes = [x.split(" | ",1)[0] for x in batch_delete]
-                        deleted, skipped = [], []
-                        with connect() as con:
-                            for selected_code in codes:
-                                row = con.execute("SELECT id,active FROM items WHERE code=%s", (selected_code,)).fetchone()
-                                if not row or int(row["active"]) != 0:
-                                    skipped.append((selected_code, "料號不存在或尚未失效"))
-                                    continue
-                                movement_count = con.execute("SELECT COUNT(*) AS n FROM movements WHERE item_id=%s", (row["id"],)).fetchone()["n"]
-                                if int(movement_count) > 0:
-                                    skipped.append((selected_code, f"有 {movement_count} 筆庫存異動紀錄"))
-                                    continue
-                                try:
-                                    # 使用 savepoint：單筆刪除受外鍵限制時，不影響同批其他料號。
-                                    with con.transaction():
-                                        con.execute("DELETE FROM items WHERE id=%s", (row["id"],))
-                                    deleted.append(selected_code)
-                                except psycopg.Error:
-                                    skipped.append((selected_code, "仍被其他資料關聯，未刪除"))
-                            con.commit()
-                        log_action(user["username"], "批量刪除失效備品", f"刪除 {len(deleted)} 筆；略過 {len(skipped)} 筆")
-                        st.success(f"批量刪除完成：成功 {len(deleted)} 筆，略過 {len(skipped)} 筆。")
-                        if skipped:
-                            st.warning("以下料號未刪除：" + "；".join(f"{c}（{reason}）" for c, reason in skipped))
-                        st.rerun()
 
     elif page == "人員與權限":
         st.title("人員與權限")
