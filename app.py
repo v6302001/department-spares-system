@@ -1962,6 +1962,42 @@ def main_app():
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     elif page == "設備異常紀錄":
+        from datetime import datetime as _ab_dt
+
+        def _ab_time_picker(label, stored=None, key=""):
+            """Select date, hour and minute explicitly; no current-time default."""
+            parsed = None
+            if stored:
+                try:
+                    parsed = _ab_dt.fromisoformat(str(stored).strip())
+                except (ValueError, TypeError):
+                    pass
+            date_col, hour_col, minute_col = st.columns([2, 1, 1])
+            with date_col:
+                selected_date = st.date_input(
+                    label + "－日期", value=parsed.date() if parsed else None,
+                    format="YYYY/MM/DD", key=key + "_date"
+                )
+            with hour_col:
+                hour = st.selectbox(
+                    label + "－時", list(range(24)),
+                    index=parsed.hour if parsed else None,
+                    format_func=lambda h: f"{h:02d}",
+                    placeholder="選擇小時", key=key + "_hour"
+                )
+            with minute_col:
+                minute = st.selectbox(
+                    label + "－分", list(range(60)),
+                    index=parsed.minute if parsed else None,
+                    format_func=lambda m: f"{m:02d}",
+                    placeholder="選擇分鐘", key=key + "_minute"
+                )
+            if selected_date is None and hour is None and minute is None:
+                return "", False
+            if selected_date is None or hour is None or minute is None:
+                return "", True
+            return f"{selected_date:%Y-%m-%d} {hour:02d}:{minute:02d}", False
+
         st.title("設備異常紀錄")
         show_module_permission_note()
         with connect() as con:
@@ -1970,18 +2006,20 @@ def main_app():
             eqmap = {f"{r['equipment_code']} | {r['equipment_name']}": r["id"] for r in eqs}
             with st.form("abnormality_form"):
                 eq_choice = st.selectbox("選擇設備", list(eqmap))
-                occurred_at = st.text_input("異常發生時間（YYYY-MM-DD HH:MM:SS）", value=now_str())
+                occurred_at, occurred_incomplete = _ab_time_picker("異常發生時間 *", key="new_ab_occurred")
                 severity = st.selectbox("異常嚴重程度", ["一般","重大","緊急"])
                 symptom = st.text_area("異常現象 *")
                 root_cause = st.text_area("異常原因／根本原因")
                 action_taken = st.text_area("處理措施與結果")
                 abnormal_status = st.selectbox("處理狀態", ["未結案", "處理中", "已結案"], index=None, placeholder="請選擇處理狀態")
                 handler_name = st.text_input("處理人員", value=user["display_name"])
-                handling_started_at = st.text_input("開始處理時間（YYYY-MM-DD HH:MM:SS）", value=now_str())
-                handling_finished_at = st.text_input("處理完成時間（未完成可留空）", value="")
+                handling_started_at, started_incomplete = _ab_time_picker("開始處理時間", key="new_ab_started")
+                handling_finished_at, finished_incomplete = _ab_time_picker("處理完成時間（可留空）", key="new_ab_finished")
                 save_abnormal = st.form_submit_button("新增異常紀錄")
             if save_abnormal:
-                if not symptom.strip():
+                if not occurred_at or occurred_incomplete or started_incomplete or finished_incomplete:
+                    st.error("請完整選擇異常發生日期及時間；其他時間若要填寫，也必須同時選擇日期與時分。")
+                elif not symptom.strip():
                     st.error("請填寫異常現象。")
                 elif not abnormal_status:
                     st.error("請選擇處理狀態：未結案、處理中或已結案。")
@@ -1990,14 +2028,14 @@ def main_app():
                 else:
                     try:
                         from datetime import datetime as _dt
-                        occurred_dt = _dt.strptime(occurred_at.strip(), "%Y-%m-%d %H:%M:%S")
-                        started_dt = _dt.strptime(handling_started_at.strip(), "%Y-%m-%d %H:%M:%S")
+                        occurred_dt = _dt.strptime(occurred_at.strip(), "%Y-%m-%d %H:%M")
+                        started_dt = _dt.strptime(handling_started_at.strip(), "%Y-%m-%d %H:%M") if handling_started_at else None
                         finished_raw = handling_finished_at.strip()
-                        finished_dt = _dt.strptime(finished_raw, "%Y-%m-%d %H:%M:%S") if finished_raw else None
-                        if finished_dt and finished_dt < started_dt:
+                        finished_dt = _dt.strptime(finished_raw, "%Y-%m-%d %H:%M") if finished_raw else None
+                        if finished_dt and started_dt and finished_dt < started_dt:
                             st.error("處理完成時間不可早於開始處理時間。")
                             raise ValueError("處理完成時間不可早於開始處理時間。")
-                        handling_hours = round((finished_dt - started_dt).total_seconds()/3600, 2) if finished_dt else 0.0
+                        handling_hours = round((finished_dt - started_dt).total_seconds()/3600, 2) if finished_dt and started_dt else 0.0
                         with connect() as con:
                             con.execute("""INSERT INTO equipment_abnormalities(
                                 equipment_id,occurred_at,severity,symptom,root_cause,action_taken,
@@ -2007,14 +2045,14 @@ def main_app():
                                 (eqmap[eq_choice],occurred_dt.strftime("%Y-%m-%d %H:%M:%S"),severity,symptom.strip(),
                                  root_cause.strip(),action_taken.strip(),abnormal_status,
                                  finished_raw if abnormal_status == "已結案" else "",user["username"],now_str(),
-                                 handler_name.strip(),started_dt.strftime("%Y-%m-%d %H:%M:%S"),finished_raw,handling_hours))
+                                 handler_name.strip(),handling_started_at,finished_raw,handling_hours))
                             con.commit()
                         log_action(user["username"], "新增設備異常", f"{eq_choice} | {handler_name.strip()} | {symptom.strip()}")
                         st.success(f"設備異常已記錄。處理時數：{handling_hours:.2f} 小時。" if finished_dt else "設備異常已記錄；處理完成後可補登完成時間以計算處理時數。")
                         st.rerun()
                     except ValueError as e:
                         if "does not match format" in str(e) or "time data" in str(e):
-                            st.error("時間格式錯誤，請使用 YYYY-MM-DD HH:MM:SS。")
+                            st.error("時間資料無效，請重新選擇日期與時分。")
                     except Exception as e:
                         st.error(f"儲存異常紀錄失敗：{e}")
         elif not eqs:
@@ -2047,36 +2085,40 @@ def main_app():
             current_ab_eq = next((k for k,v in abnormal_eq_map.items() if v == ar['equipment_id']), list(abnormal_eq_map)[0])
             with st.form("edit_abnormal_form"):
                 ab_eq = st.selectbox("設備", list(abnormal_eq_map), index=list(abnormal_eq_map).index(current_ab_eq))
-                ab_occurred = st.text_input("異常發生時間（YYYY-MM-DD HH:MM:SS）", value=ar['occurred_at'] or "")
+                ab_occurred, ab_occurred_incomplete = _ab_time_picker("異常發生時間 *", ar['occurred_at'], key=f"edit_ab_occurred_{ar['id']}")
                 ab_severity = st.selectbox("嚴重程度", ["一般","重大","緊急"], index=["一般","重大","緊急"].index(ar['severity']) if ar['severity'] in ["一般","重大","緊急"] else 0)
                 ab_symptom = st.text_area("異常現象 *", value=ar['symptom'] or "")
                 ab_cause = st.text_area("異常原因／根本原因", value=ar['root_cause'] or "")
                 ab_action = st.text_area("處理措施與結果", value=ar['action_taken'] or "")
                 ab_handler = st.text_input("處理人員", value=ar['handler_name'] or "")
-                ab_started = st.text_input("開始處理時間（YYYY-MM-DD HH:MM:SS）", value=ar['handling_started_at'] or "")
-                ab_finished = st.text_input("完成時間（可空白）", value=ar['handling_finished_at'] or "")
+                ab_started, ab_started_incomplete = _ab_time_picker("開始處理時間", ar['handling_started_at'], key=f"edit_ab_started_{ar['id']}")
+                ab_finished, ab_finished_incomplete = _ab_time_picker("處理完成時間（可留空）", ar['handling_finished_at'], key=f"edit_ab_finished_{ar['id']}")
                 ab_status = st.selectbox("處理狀態", ["未結案","處理中","已結案"], index=["未結案","處理中","已結案"].index(ar['status']) if ar['status'] in ["未結案","處理中","已結案"] else 0)
                 save_ab_changes = st.form_submit_button("儲存異常紀錄修改")
             if save_ab_changes:
                 from datetime import datetime as _dt
                 try:
-                    occurred_dt = _dt.strptime(ab_occurred.strip(), "%Y-%m-%d %H:%M:%S")
-                    started_dt = _dt.strptime(ab_started.strip(), "%Y-%m-%d %H:%M:%S")
-                    finished_dt = _dt.strptime(ab_finished.strip(), "%Y-%m-%d %H:%M:%S") if ab_finished.strip() else None
+                    if not ab_occurred or ab_occurred_incomplete or ab_started_incomplete or ab_finished_incomplete:
+                        st.error("請完整選擇異常發生日期及時間；其他時間若填寫，也須選擇日期與時分。")
+                        raise ValueError("時間欄位未完整填寫")
+                    occurred_dt = _dt.strptime(ab_occurred.strip(), "%Y-%m-%d %H:%M")
+                    started_dt = _dt.strptime(ab_started.strip(), "%Y-%m-%d %H:%M") if ab_started else None
+                    finished_dt = _dt.strptime(ab_finished.strip(), "%Y-%m-%d %H:%M") if ab_finished else None
                     if not ab_symptom.strip() or not ab_handler.strip():
                         st.error("異常現象與處理人員為必填。")
-                    elif finished_dt and finished_dt < started_dt:
+                    elif finished_dt and started_dt and finished_dt < started_dt:
                         st.error("完成時間不可早於開始處理時間。")
                     else:
-                        handling_hours = round((finished_dt-started_dt).total_seconds()/3600, 2) if finished_dt else 0.0
+                        handling_hours = round((finished_dt-started_dt).total_seconds()/3600, 2) if finished_dt and started_dt else 0.0
                         with connect() as con:
-                            con.execute("UPDATE equipment_abnormalities SET equipment_id=%s,occurred_at=%s,severity=%s,symptom=%s,root_cause=%s,action_taken=%s,handler_name=%s,handling_started_at=%s,handling_finished_at=%s,handling_hours=%s,status=%s,closed_at=%s WHERE id=%s", (abnormal_eq_map[ab_eq],occurred_dt.strftime("%Y-%m-%d %H:%M:%S"),ab_severity,ab_symptom.strip(),ab_cause.strip(),ab_action.strip(),ab_handler.strip(),started_dt.strftime("%Y-%m-%d %H:%M:%S"),ab_finished.strip(),handling_hours,ab_status,ab_finished.strip() if ab_status=="已結案" else "",ar['id']))
+                            con.execute("UPDATE equipment_abnormalities SET equipment_id=%s,occurred_at=%s,severity=%s,symptom=%s,root_cause=%s,action_taken=%s,handler_name=%s,handling_started_at=%s,handling_finished_at=%s,handling_hours=%s,status=%s,closed_at=%s WHERE id=%s", (abnormal_eq_map[ab_eq],occurred_dt.strftime("%Y-%m-%d %H:%M:%S"),ab_severity,ab_symptom.strip(),ab_cause.strip(),ab_action.strip(),ab_handler.strip(),ab_started,ab_finished,handling_hours,ab_status,ab_finished.strip() if ab_status=="已結案" else "",ar['id']))
                             con.commit()
                         log_action(user["username"], "修改設備異常", str(ar['id']))
                         st.success("設備異常紀錄已修改。")
                         st.rerun()
-                except ValueError:
-                    st.error("時間格式錯誤，請使用 YYYY-MM-DD HH:MM:SS。")
+                except ValueError as e:
+                    if str(e) != "時間欄位未完整填寫":
+                        st.error("時間資料無效，請重新選擇日期與時分。")
             # 員工只能修改自己登錄的紀錄，不提供刪除功能。
             if can_manage_all_abnormalities:
                 st.checkbox("確認刪除此筆異常紀錄", key="confirm_delete_abnormal")
