@@ -1084,6 +1084,124 @@ def normalize_import_columns(df):
             rename[c] = aliases[key]
     return df.rename(columns=rename)
 
+COST_MONTHS = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"]
+
+
+def init_cost_share_table():
+    """Non-destructive schema initialization and annual rollover."""
+    current_year = datetime.now(VN_TZ).year
+    with connect() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS spares.vn_cost_share_years (
+            year INTEGER PRIMARY KEY,
+            rows_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TIMESTAMP
+        )""")
+        for year in range(2026, max(2026, current_year) + 1):
+            con.execute("""INSERT INTO spares.vn_cost_share_years (year)
+                           VALUES (%s) ON CONFLICT (year) DO NOTHING""", (year,))
+
+
+def render_cost_share():
+    require_manager_or_higher()
+    init_cost_share_table()
+    st.title("越南分攤費用統計")
+    st.caption("僅管理員及系統管理員可查看及編輯；每年首次開啟時自動建立新年度空白表，歷史年度永久保留。")
+    with connect() as con:
+        years = [int(r["year"]) for r in con.execute(
+            "SELECT year FROM spares.vn_cost_share_years ORDER BY year DESC").fetchall()]
+    current_year = datetime.now(VN_TZ).year
+    # Use string options: Streamlit's bilingual selectbox wrapper requires
+    # string labels; numeric options can raise TypeError during rendering.
+    year_options = [str(y) for y in years]
+    selected_year = st.selectbox(
+        "選擇統計年度／調閱歷史", year_options,
+        index=year_options.index(str(current_year)) if str(current_year) in year_options else 0,
+    )
+    year = int(selected_year)
+    st.subheader(f"{year}越南分攤費用統計（VND）")
+    with connect() as con:
+        record = con.execute("SELECT rows_json FROM spares.vn_cost_share_years WHERE year=%s", (year,)).fetchone()
+    raw_rows = record["rows_json"] if record else []
+    if isinstance(raw_rows, str):
+        raw_rows = json.loads(raw_rows)
+    cols = ["項目"] + COST_MONTHS
+    data = [{col: row.get(col, "" if col == "項目" else None) for col in cols}
+            for row in raw_rows if isinstance(row, dict)]
+    if not data:
+        data = [{"項目": "", **{month: None for month in COST_MONTHS}} for _ in range(15)]
+    df = pd.DataFrame(data, columns=cols)
+    st.caption("金額單位：VND（越南盾）；金額以千分位顯示。最下方為每月合計與年度總額。")
+    # Editor widget key includes year to avoid carrying changes across different years.
+    with st.form(f"vn_cost_share_form_{year}"):
+        edited = st.data_editor(
+            df, key=f"vn_cost_share_editor_{year}", use_container_width=True,
+            hide_index=True, num_rows="dynamic",
+            column_config={
+                "項目": st.column_config.TextColumn("項目", width="medium"),
+                **{m: st.column_config.NumberColumn(m, format="%,.0f VND", step=1.0)
+                   for m in COST_MONTHS},
+            },
+        )
+        submitted = st.form_submit_button("儲存本年度表格", type="primary")
+    if submitted:
+        cleaned = []
+        names = set()
+        error = None
+        for _, row in edited.iterrows():
+            name = str(row["項目"]).strip() if pd.notna(row["項目"]) else ""
+            values = {}
+            has_amount = False
+            for month in COST_MONTHS:
+                value = row[month]
+                if pd.isna(value):
+                    values[month] = None
+                else:
+                    has_amount = True
+                    values[month] = float(value)
+            if not name:
+                if has_amount:
+                    error = "有月份金額但未填寫項目名稱，請補上名稱。"
+                    break
+                continue
+            if name in names:
+                error = f"項目名稱重複：{name}，請修正。"
+                break
+            names.add(name)
+            cleaned.append({"項目": name, **values})
+        if error:
+            st.error(error)
+        else:
+            with connect() as con:
+                con.execute("""UPDATE spares.vn_cost_share_years
+                    SET rows_json=%s::jsonb, updated_by=%s, updated_at=NOW()
+                    WHERE year=%s""", (json.dumps(cleaned, ensure_ascii=False),
+                                      st.session_state.user["username"], year))
+            st.success(f"{year} 年度資料已儲存。")
+            st.rerun()
+    # Read the persisted rows (not the editor's unsaved state) for the totals.
+    # Render totals outside st.data_editor so users cannot accidentally edit them.
+    if raw_rows:
+        totals = {month: sum(
+            float(row.get(month) or 0)
+            for row in raw_rows if isinstance(row, dict)
+        ) for month in COST_MONTHS}
+        annual_total = sum(totals.values())
+        total_display = pd.DataFrame([{"項目": "每月合計", **totals}])
+        st.dataframe(total_display, hide_index=True, use_container_width=True,
+                     column_config={
+                         "項目": st.column_config.TextColumn("項目"),
+                         **{m: st.column_config.NumberColumn(m, format="%,.0f VND")
+                            for m in COST_MONTHS},
+                     })
+        st.metric("年度總額（VND）", f"{annual_total:,.0f} VND")
+        export_df = pd.DataFrame(raw_rows, columns=cols)
+        export_df = pd.concat([export_df, pd.DataFrame([{"項目": "每月合計", **totals}])], ignore_index=True)
+        st.download_button("下載年度 Excel", data=excel_bytes({f"{year}越南分攤費用": export_df}),
+                           file_name=f"越南分攤費用統計_{year}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 def main_app():
     user = st.session_state.user
     with st.sidebar:
@@ -1095,6 +1213,8 @@ def main_app():
         st.caption("權限：" + ROLE_LABELS.get(user["role"], user["role"]))
 
         modules = ["模塊首頁", "人員管理模塊", "設備管理模塊", "備品管理模塊"]
+        if user["role"] in ("system_admin", "manager"):
+            modules.append("越南分攤費用統計")
         module = st.radio("三大功能模塊", modules, key="main_module")
         if module == "模塊首頁":
             pages = ["模塊首頁"]
@@ -1105,6 +1225,8 @@ def main_app():
                 pages = ["人員總覽", "人員資料與技能", "人員技能矩陣", "培訓紀錄", "考試紀錄"]
         elif module == "設備管理模塊":
             pages = ["設備總覽", "設備資料管理", "保養計畫與紀錄", "設備異常紀錄"]
+        elif module == "越南分攤費用統計":
+            pages = ["年度費用統計"]
         else:
             if user["role"] == "system_admin":
                 pages = [
@@ -1121,7 +1243,10 @@ def main_app():
             del st.session_state.user
             st.rerun()
 
-    if page == "模塊首頁":
+    if page == "年度費用統計":
+        render_cost_share()
+
+    elif page == "模塊首頁":
         st.title("🏭 部門管理系統")
         st.subheader("三大功能模塊")
         st.caption("請選擇要使用的管理模塊。")
